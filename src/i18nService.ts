@@ -5,7 +5,7 @@ import * as fs from 'fs/promises';
 export interface LanguageData {
   code: string;
   /**
-   * For `json`/`ini` formats: absolute path of the single translation file.
+   * For `json`/`ini`/`ts` formats: absolute path of the single translation file.
    * For `php` (CodeIgniter 4) format: absolute path of the locale DIRECTORY
    * (e.g. `app/Language/en`), which contains one `*.php` group file per
    * top-level namespace (`Messages.php`, `Buttons.php`, ...).
@@ -21,12 +21,12 @@ export interface LanguageData {
   groupFiles?: string[];
 }
 
-export type TranslationFormat = "json" | "ini" | "php";
+export type TranslationFormat = "json" | "ini" | "ts" | "php";
 
 /**
  * A workspace folder that *looks* like a translations folder — it contains
  * one or more files whose names match common locale patterns (`en.json`,
- * `en_US.ini`, `en-US.json`, …). Surfaced in the empty state so the user
+ * `en_US.ini`, `pt_BR.ts`, `en-US.json`, …). Surfaced in the empty state so the user
  * can one-click instead of digging through the file picker.
  */
 export interface FolderSuggestion {
@@ -51,14 +51,14 @@ export interface I18nState {
   aiAvailable: boolean;
   /**
    * When `configured` is false, candidate folders detected in the workspace
-   * that look like they hold translation files (`en.json`, `en-US.ini`, …).
+   * that look like they hold translation files (`en.json`, `en-US.ini`, `pt_BR.ts`, …).
    * Empty otherwise.
    */
   folderSuggestions: FolderSuggestion[];
 }
 
 export class I18nService {
-  private static readonly SUPPORTED_EXTENSIONS = [".json", ".ini"] as const;
+  private static readonly SUPPORTED_EXTENSIONS = [".json", ".ini", ".ts"] as const;
   /** CodeIgniter 4 group filenames are valid PHP identifiers (e.g. `Messages.php`). */
   private static readonly CI4_GROUP_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -641,10 +641,10 @@ export class I18nService {
 
   /**
    * Scan the workspace for folders that look like they hold translation
-   * .json/.ini files and return them ranked by likelihood.
+   * .json/.ini/.ts files and return them ranked by likelihood.
    *
    * Heuristic: a folder qualifies when at least one direct-child translation
-   * file has a locale-style name (`en.json`, `en-US.ini`, `zh-Hans.json`, …).
+   * file has a locale-style name (`en.json`, `en-US.ini`, `pt_BR.ts`, …).
    * The scan honours `files.exclude`/`search.exclude` and skips heavy
    * directories (node_modules, dist, build, .next, .git, …).
    *
@@ -660,7 +660,7 @@ export class I18nService {
     let uris: vscode.Uri[];
     try {
       uris = await vscode.workspace.findFiles(
-        "**/*.{json,ini,php}",
+        "**/*.{json,ini,ts,php}",
         "**/{node_modules,out,dist,build,.next,.nuxt,coverage,.git,.svn,.hg,.idea,.vscode-test,.cache,vendor,target,bin,obj}/**",
         4000,
       );
@@ -885,10 +885,12 @@ export class I18nService {
       const filePath = path.join(folderPath, file);
       try {
         const content = await fs.readFile(filePath, "utf-8");
-        const format = ext === ".ini" ? "ini" : "json";
+        const format = this.formatFromExtension(ext);
         const data =
           format === "ini"
             ? this.parseIni(content)
+            : format === "ts"
+              ? this.parseTsLocaleFile(content)
             : this.flattenJsonContent(content);
         languages.push({
           code: path.basename(file, ext),
@@ -983,14 +985,14 @@ export class I18nService {
   ): Promise<void> {
     const format =
       options?.format ??
-      (path.extname(filePath).toLowerCase() === ".ini"
-        ? "ini"
-        : path.extname(filePath).toLowerCase() === ".php"
-          ? "php"
-          : "json");
+      this.formatFromExtension(path.extname(filePath).toLowerCase());
 
     if (format === "ini") {
       await fs.writeFile(filePath, this.stringifyIni(flat), "utf-8");
+      return;
+    }
+    if (format === "ts") {
+      await fs.writeFile(filePath, this.stringifyTsLocaleFile(filePath, flat), "utf-8");
       return;
     }
     if (format === "php") {
@@ -1391,6 +1393,19 @@ export class I18nService {
     );
   }
 
+  private formatFromExtension(ext: string): TranslationFormat {
+    switch (ext.toLowerCase()) {
+      case ".ini":
+        return "ini";
+      case ".ts":
+        return "ts";
+      case ".php":
+        return "php";
+      default:
+        return "json";
+    }
+  }
+
   private flattenJsonContent(content: string): Record<string, string> {
     const trimmed = content.trim();
     const data = trimmed.length === 0 ? {} : JSON.parse(trimmed);
@@ -1461,6 +1476,55 @@ export class I18nService {
       .replace(/\n/g, "\\n")
       .replace(/\t/g, "\\t")
       .replace(/"/g, '\\"');
+  }
+
+  // ─── TypeScript flat string-map locale files ───────────────
+
+  /**
+   * Parse files like:
+   *
+   *     export const pt_BR: Record<string, string> = {
+   *       'alert.passwordLength': 'Insira uma nova senha...',
+   *       'dialog.actionResetPassword':
+   *         'Definir uma nova senha...',
+   *     };
+   *
+   * Supports single-, double- and backtick-quoted string keys/values,
+   * comments, trailing commas, and multiline formatting. Template literals
+   * with `${...}` interpolation are rejected because their value is dynamic.
+   */
+  parseTsLocaleFile(content: string): Record<string, string> {
+    const parser = new TsStringMapParser(content);
+    return parser.parseFile();
+  }
+
+  stringifyTsLocaleFile(filePath: string, flat: Record<string, string>): string {
+    const code = path.basename(filePath, ".ts");
+    const exportName = this.localeCodeToTsIdentifier(code);
+    const lines = Object.keys(flat)
+      .sort()
+      .map((key) => `  ${this.tsQuote(key)}: ${this.tsQuote(flat[key] ?? "")},`);
+    return (
+      `export const ${exportName}: Record<string, string> = {\n` +
+      lines.join("\n") +
+      (lines.length > 0 ? "\n" : "") +
+      "};\n"
+    );
+  }
+
+  private localeCodeToTsIdentifier(code: string): string {
+    const replaced = code.replace(/[^A-Za-z0-9_$]/g, "_");
+    const identifier = /^[A-Za-z_$]/.test(replaced) ? replaced : `_${replaced}`;
+    return identifier || "locale";
+  }
+
+  private tsQuote(s: string): string {
+    return `'${s
+      .replace(/\\/g, "\\\\")
+      .replace(/\r/g, "\\r")
+      .replace(/\n/g, "\\n")
+      .replace(/\t/g, "\\t")
+      .replace(/'/g, "\\'")}'`;
   }
 
   private pickNewLanguageFormat(
@@ -1538,6 +1602,224 @@ export class I18nService {
   /** Wrap a string in single quotes with PHP-style escaping (`\\` and `\'`). */
   private phpQuote(s: string): string {
     return `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+  }
+}
+
+/**
+ * Minimal parser for TypeScript locale modules that export a flat
+ * Record<string, string> object. It intentionally parses data literals only,
+ * not arbitrary TypeScript expressions.
+ */
+class TsStringMapParser {
+  private i = 0;
+
+  constructor(private readonly src: string) {}
+
+  parseFile(): Record<string, string> {
+    const objectStart = this.findLocaleObjectStart();
+    if (objectStart < 0) {
+      throw new Error("Could not find a TypeScript locale object literal.");
+    }
+    this.i = objectStart + 1;
+    return this.parseObjectBody();
+  }
+
+  private findLocaleObjectStart(): number {
+    const exportConst = /\bexport\s+const\s+[A-Za-z_$][\w$]*\b[\s\S]*?=/.exec(
+      this.src,
+    );
+    if (exportConst) {
+      const open = this.src.indexOf("{", exportConst.index + exportConst[0].length);
+      if (open >= 0) return open;
+    }
+
+    const exportDefault = /\bexport\s+default\b/.exec(this.src);
+    if (exportDefault) {
+      const open = this.src.indexOf("{", exportDefault.index + exportDefault[0].length);
+      if (open >= 0) return open;
+    }
+
+    return this.src.indexOf("{");
+  }
+
+  private parseObjectBody(): Record<string, string> {
+    const result: Record<string, string> = {};
+    while (true) {
+      this.skipWhitespaceAndComments();
+      const c = this.src[this.i];
+      if (c === "}") {
+        this.i++;
+        this.skipWhitespaceAndComments();
+        if (this.src[this.i] === ";") this.i++;
+        return result;
+      }
+      if (c === undefined) throw new Error("Unterminated TypeScript locale object.");
+
+      const key = this.parsePropertyKey();
+      this.skipWhitespaceAndComments();
+      if (this.src[this.i] !== ":") {
+        throw new Error(`Expected ":" after key "${key}" at offset ${this.i}.`);
+      }
+      this.i++;
+      this.skipWhitespaceAndComments();
+      const value = this.parseStringLiteral();
+      result[key] = value;
+
+      this.skipWhitespaceAndComments();
+      if (this.src[this.i] === ",") {
+        this.i++;
+        continue;
+      }
+      if (this.src[this.i] === "}") continue;
+      throw new Error(
+        `Expected "," or "}" at offset ${this.i}; saw "${this.src.slice(this.i, this.i + 10)}".`,
+      );
+    }
+  }
+
+  private parsePropertyKey(): string {
+    this.skipWhitespaceAndComments();
+    const c = this.src[this.i];
+    if (c === "'" || c === '"' || c === "`") return this.parseStringLiteral();
+
+    const match = /^[A-Za-z_$][\w$]*/.exec(this.src.slice(this.i));
+    if (!match) {
+      throw new Error(`Expected property key at offset ${this.i}.`);
+    }
+    this.i += match[0].length;
+    return match[0];
+  }
+
+  private parseStringLiteral(): string {
+    const quote = this.src[this.i];
+    if (quote !== "'" && quote !== '"' && quote !== "`") {
+      throw new Error(`Expected string literal at offset ${this.i}.`);
+    }
+    this.i++;
+    let out = "";
+    while (this.i < this.src.length) {
+      const c = this.src[this.i];
+      if (c === quote) {
+        this.i++;
+        return out;
+      }
+      if (quote === "`" && c === "$" && this.src[this.i + 1] === "{") {
+        throw new Error("Template literals with interpolation are not supported in locale files.");
+      }
+      if (c === "\\") {
+        out += this.parseEscapeSequence(quote);
+        continue;
+      }
+      if (quote !== "`" && (c === "\n" || c === "\r")) {
+        throw new Error("Unterminated string literal.");
+      }
+      out += c;
+      this.i++;
+    }
+    throw new Error("Unterminated string literal.");
+  }
+
+  private parseEscapeSequence(quote: string): string {
+    this.i++;
+    const c = this.src[this.i];
+    if (c === undefined) return "\\";
+    this.i++;
+    switch (c) {
+      case "n":
+        return "\n";
+      case "r":
+        return "\r";
+      case "t":
+        return "\t";
+      case "b":
+        return "\b";
+      case "f":
+        return "\f";
+      case "v":
+        return "\v";
+      case "0":
+        return "\0";
+      case "\r":
+        if (this.src[this.i] === "\n") this.i++;
+        return "";
+      case "\n":
+        return "";
+      case "u":
+        return this.parseUnicodeEscape();
+      case "x":
+        return this.parseHexEscape();
+      case "\\":
+      case "'":
+      case '"':
+      case "`":
+        return c;
+      default:
+        return quote === "`" ? c : c;
+    }
+  }
+
+  private parseUnicodeEscape(): string {
+    if (this.src[this.i] === "{") {
+      const close = this.src.indexOf("}", this.i + 1);
+      if (close > this.i + 1) {
+        const hex = this.src.slice(this.i + 1, close);
+        if (/^[0-9a-fA-F]+$/.test(hex)) {
+          this.i = close + 1;
+          const codePoint = parseInt(hex, 16);
+          if (Number.isFinite(codePoint)) {
+            try {
+              return String.fromCodePoint(codePoint);
+            } catch {
+              return "";
+            }
+          }
+        }
+      }
+      return "u";
+    }
+
+    const hex = this.src.slice(this.i, this.i + 4);
+    if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+      this.i += 4;
+      return String.fromCharCode(parseInt(hex, 16));
+    }
+    return "u";
+  }
+
+  private parseHexEscape(): string {
+    const hex = this.src.slice(this.i, this.i + 2);
+    if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+      this.i += 2;
+      return String.fromCharCode(parseInt(hex, 16));
+    }
+    return "x";
+  }
+
+  private skipWhitespaceAndComments(): void {
+    while (this.i < this.src.length) {
+      const c = this.src[this.i];
+      if (c === " " || c === "\t" || c === "\n" || c === "\r") {
+        this.i++;
+        continue;
+      }
+      if (c === "/" && this.src[this.i + 1] === "/") {
+        this.i += 2;
+        while (this.i < this.src.length && this.src[this.i] !== "\n") this.i++;
+        continue;
+      }
+      if (c === "/" && this.src[this.i + 1] === "*") {
+        this.i += 2;
+        while (
+          this.i < this.src.length &&
+          !(this.src[this.i] === "*" && this.src[this.i + 1] === "/")
+        ) {
+          this.i++;
+        }
+        if (this.i < this.src.length) this.i += 2;
+        continue;
+      }
+      return;
+    }
   }
 }
 

@@ -45,9 +45,9 @@ export function activate(context: vscode.ExtensionContext) {
     const folder = i18nService.resolveFolderPath();
     if (folder) {
       // Watch both flat translation files at the folder root (`en.json`,
-      // `en-US.ini`) AND CodeIgniter 4 group files nested one level deep
+      // `en-US.ini`, `pt_BR.ts`) AND CodeIgniter 4 group files nested one level deep
       // (`<folder>/<locale>/<Group>.php`).
-      const pattern = new vscode.RelativePattern(folder, "{*.{json,ini},*/*.php}");
+      const pattern = new vscode.RelativePattern(folder, "{*.{json,ini,ts},*/*.php}");
       watcher = vscode.workspace.createFileSystemWatcher(pattern);
       watcher.onDidChange(() => {
         sidebarProvider.refresh();

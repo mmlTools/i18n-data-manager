@@ -35,6 +35,7 @@
     "translation",
     "translations",
     "json",
+    "typescript",
     "language",
     "locale",
     "i18next",
@@ -135,7 +136,7 @@
         "LocaleSynci18n.translationsPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the folder containing your translation files (relative to the workspace root or absolute). Supports flat JSON/INI files (e.g. en.json, en-US.ini) and CodeIgniter 4 PHP language folders (e.g. app/Language/ with en/Messages.php, es/Messages.php, ...)."
+          "description": "Path to the folder containing your translation files (relative to the workspace root or absolute). Supports flat JSON/INI/TypeScript files (e.g. en.json, en-US.ini, pt_BR.ts) and CodeIgniter 4 PHP language folders (e.g. app/Language/ with en/Messages.php, es/Messages.php, ...)."
         },
         "LocaleSynci18n.defaultLanguage": {
           "type": "string",
